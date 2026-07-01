@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>오목 프로젝트</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.5.1/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <style>
+        #board { display: grid; grid-template-columns: repeat(15, 30px); background-color: #f3c36d; width: 450px; height: 450px; border: 1px solid #000; }
+        .cell { width: 30px; height: 30px; border: 1px solid #000; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+        .stone { width: 25px; height: 25px; border-radius: 50%; }
+        .BLACK { background-color: black; }
+        .WHITE { background-color: white; }
+    </style>
+</head>
+<body>
+<h2>오목 실시간 대전</h2>
+<div id="winner-display" style="font-size: 20px; font-weight: bold; color: red;"></div>
+<div id="status-container" style="text-align: center; margin-bottom: 10px;">
+    <span id="turn-indicator" style="font-size: 1.2em; font-weight: bold;">현재 차례: 흑돌 (BLACK)</span>
+</div>
+<div id="board"></div>
+
+<div style="text-align: center; margin-top: 10px;">
+    <button id="reset-btn" style="display: none; padding: 10px 20px;" onclick="sendReset()">다시 플레이하기</button>
+</div>
+
+<script>
+    let stompClient = null;
+    const boardSize = 15;
+    window.onload = function() {
+        createBoard(); // 페이지가 열리자마자 15x15 판을 그립니다.
+        connect();     // 그 다음 서버에 연결합니다.
+    };
+    // 1. WebSocket 연결 및 구독
+    let myUniqueId = null;
+    function connect() {
+        const socket = new SockJS('http://localhost:8080/ws-omok');
+        stompClient = Stomp.over(socket);
+
+        stompClient.connect({}, function (frame) {
+            const url = stompClient.ws._transport.url;
+            myUniqueId = url.split('/')[url.split('/').length - 2];
+            console.log('Connected. My ID:', myUniqueId);
+
+            // 돌 놓기 결과 구독
+            stompClient.subscribe('/sub/game/board', function (message) {
+                const data = JSON.parse(message.body);
+
+                // 1. 돌 그리기
+                drawStone(data.x, data.y, data.color);
+
+                if (data.nextTurn) {
+                    const indicator = document.getElementById('turn-indicator');
+                    const turnText = data.nextTurn === 'BLACK' ? "흑돌 (BLACK)" : "백돌 (WHITE)";
+                    indicator.innerText = `현재 차례: ${turnText}`;
+                    indicator.style.color = data.nextTurn === 'BLACK' ? "black" : "blue";
+                }
+            });
+
+            // 승리 알림 구독
+            stompClient.subscribe('/sub/game/winner', function (message) {
+                console.log("승리 메시지 수신:", message.body);
+
+                // 1. 승리자 알림 (예: BLACK 승리!)
+                document.getElementById('winner-display').innerText = message.body;
+
+                // 2. 턴 표시기를 "게임 종료"로 변경 (핵심!)
+                const indicator = document.getElementById('turn-indicator');
+                if (indicator) {
+                    indicator.innerText = "🎮 게임 종료 🎮";
+                    indicator.style.color = "red"; // 강조를 위해 빨간색으로 변경
+                }
+
+                // 3. 리셋 버튼 보이기
+                const resetBtn = document.getElementById('reset-btn');
+                if (resetBtn) {
+                    resetBtn.style.display = 'inline-block';
+                }
+            });
+
+            // 리셋 메시지 구독
+            stompClient.subscribe('/sub/game/reset', function (message){
+                document.getElementById('winner-display').innerText = '';
+                document.getElementById('reset-btn').style.display = 'none';
+                const boardDiv = document.getElementById('board');
+                boardDiv.innerHTML = '';
+                document.getElementById('turn-indicator').innerText = "현재 차례: 흑돌 (BLACK)";
+                document.getElementById('turn-indicator').style.color = "black";
+                createBoard();
+            });
+            stompClient.subscribe('/sub/game/init', function (message) {
+                const data = JSON.parse(message.body);
+                console.log("초기 데이터 수신:", data);
+
+                const boardState = data.board;
+                const isGameOver = data.isGameOver;
+                const myRole = data.myRole;
+
+                // 에러 방지: 존재하는 ID인지 확인하고 텍스트 대입
+                const roleDisplay = document.getElementById('my-role-display');
+                if (roleDisplay) {
+                    roleDisplay.innerText = `당신은 ${myRole === 'BLACK' ? '흑돌' : (myRole === 'WHITE' ? '백돌' : '관전자')}입니다.`;
+                }
+
+                // 1. 기존 돌들 그리기 (에러가 나지 않도록 위쪽 에러를 해결했으므로 이제 실행됨)
+                if (boardState) {
+                    for (let y = 0; y < 15; y++) {
+                        for (let x = 0; x < 15; x++) {
+                            if (boardState[y][x] !== 'NONE') {
+                                drawStone(x, y, boardState[y][x]);
+                            }
+                        }
+                    }
+                }
+                const indicator = document.getElementById('turn-indicator');
+                if (!data.isGameOver) {
+                    const turnText = data.currentTurn === 'BLACK' ? "흑돌 (BLACK)" : "백돌 (WHITE)";
+                    indicator.innerText = `현재 차례: ${turnText}`;
+                    indicator.style.color = data.currentTurn === 'BLACK' ? "black" : "blue";
+                }
+
+                // 3. 내 역할 안내 (winner-display 영역 활용)
+                const roleText = data.myRole === 'BLACK' ? "흑돌" : (data.myRole === 'WHITE' ? "백돌" : "관전자");
+                document.getElementById('winner-display').innerText = `당신은 ${roleText}입니다.`;
+
+                // 2. 게임이 이미 종료된 상태라면 UI 업데이트 (핵심!)
+                if (isGameOver) {
+                    // 턴 표시기를 게임 종료로
+                    const indicator = document.getElementById('turn-indicator');
+                    indicator.innerText = "🎮 게임 종료 🎮";
+                    indicator.style.color = "red";
+
+                    // 리셋 버튼 보이기
+                    const resetBtn = document.getElementById('reset-btn');
+                    if (resetBtn) {
+                        resetBtn.style.display = 'inline-block';
+                    }
+
+                    // 승리자 안내 텍스트 (필요 시 서버에서 winner 정보를 받아와서 처리)
+                    document.getElementById('winner-display').innerText = "이미 종료된 게임입니다.";
+                }
+            });
+            setTimeout(() => { // 아주 약간의 지연을 주면 더 안전합니다
+                stompClient.send("/pub/game/initState", {}, {});
+            }, 100);
+        });
+    }
+
+    function createBoard() {
+        const boardDiv = document.getElementById('board');
+        boardDiv.innerHTML = ''; // 기존 내용 싹 지우기
+
+        for (let y = 0; y < 15; y++) {
+            for (let x = 0; x < 15; x++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                // 여기서 클릭 시 좌표를 보내는 이벤트가 다시 붙습니다.
+                cell.id = `cell-${x}-${y}`;
+
+                cell.onclick = () => {
+                    if (cell.hasChildNodes()) return;
+                    if (stompClient && stompClient.connected) {
+                        stompClient.send("/pub/game/move", {}, JSON.stringify({x: x, y: y}));
+                    }
+                };
+                boardDiv.appendChild(cell);
+            }
+        }
+    }
+
+    function sendReset() {
+        stompClient.send("/pub/game/reset", {}, JSON.stringify({}));
+    }
+
+    // 2. 서버로 좌표 전송
+    function sendMove(x, y) {
+        stompClient.send("/pub/game/move", {}, JSON.stringify({x: x, y: y}));
+    }
+
+    function drawStone(x, y, color) {
+        const cell = document.getElementById(`cell-${x}-${y}`);
+        if (!cell) return; // 칸이 없어도 에러 내지 않고 다음 돌로 넘어감
+        if (cell.hasChildNodes()) return; // 이미 돌이 있으면 패스
+
+        const stone = document.createElement('div');
+        stone.className = `stone ${color}`;
+        cell.appendChild(stone);
+    }
+    function updateTurnUI(nextTurn) {
+        const indicator = document.getElementById('turn-indicator');
+        const colorText = nextTurn === 'BLACK' ? '흑돌' : '백돌';
+        indicator.innerHTML = `현재 차례: <span class="stone ${nextTurn}" style="display:inline-block; width:15px; height:15px; vertical-align:middle;"></span> ${colorText}`;
+    }
+
+    connect();
+</script>
+</body>
+</html>
